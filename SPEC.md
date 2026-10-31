@@ -1,6 +1,6 @@
 # SPEC.md: BatchRouter (source of truth for behaviour)
 
-**Status:** Phase 1 draft, 2026-10-26. Code must match this file; if they diverge, update one deliberately and log it in `DECISIONS.md`.
+**Status:** Phase 1 draft, 2026-10-26. Phase 3 (2026-11-01): §5, §6 commit/reveal/claim/withdraw and §8 are implemented in `src/BatchRouter.sol`; settle step 1 only (see §6.1). Code must match this file; if they diverge, update one deliberately and log it in `DECISIONS.md`.
 
 **Educational reference only. Not audited.**
 
@@ -24,7 +24,7 @@ A companion `NaiveRouter` (Phase 2) swaps directly on the pair and is the attack
 | `treasury` | `address` | Sole recipient of forfeited bonds | non-zero |
 | `commitBlocks` (C) | `uint64` | Length of a batch's commit window | ≥ 1 |
 | `revealBlocks` (R) | `uint64` | Length of the reveal window | ≥ 1 |
-| `bond` | `uint256` | ETH (`msg.value`) required per commit | > 0 |
+| `bond` | `uint256` | ETH (`msg.value`) required per commit | > 0 (`ZeroAmount`) |
 | `genesisBlock` (g) | `uint64` | `block.number` at deploy | — |
 
 Constant: `MAX_ORDERS_PER_BATCH = 100` (re-tuned in Phase 7 from gas data).
@@ -138,7 +138,7 @@ Reverts with:
 - `ZeroAmount` if `amountIn == 0`;
 - `ExceedsEscrow` if `amountIn > escrow`.
 
-Effects: stores `amountIn` and `minOut`; the status becomes `Revealed`.
+Effects: stores `amountIn` and `minOut`; the status becomes `Revealed`. A `minOut` above `type(uint128).max` is stored saturated at that maximum (no payout can reach it, so the order is excluded at settle instead of being unrevealable).
 
 Emits: `Revealed(batchId, index, amountIn, minOut)`.
 
@@ -163,6 +163,7 @@ Algorithm:
 5. **Record.** Store `filledInA`, `filledInB`, `potA` and `potB`; mark the included orders `Filled` and set `settled = true`.
 
 Emits:
+- `OrderForfeited(batchId, index)` for each forfeited order;
 - `OrderExcluded(batchId, index)` for each excluded order;
 - `Settled(batchId, filledInA, filledInB, residualToken, residualIn, residualOut, potA, potB)`.
 
@@ -180,9 +181,16 @@ Emits:
 
 Emits: `Claimed(batchId, index, user, amountOut, refund, bondReturned)`.
 
+### 6.1 Phase 3 interim settle and claim (D-013)
+
+Until Phase 4 adds clearing, `settle` runs only step 1 (forfeit) and step 5's `settled = true`, and emits `Settled` with all amounts zero and `residualToken = address(0)`. Revealed orders keep status `Revealed`. `claim` on a `Revealed` order refunds the full `escrow` and the bond (the same payout as `Excluded`). Phase 4 removes this interim branch: after settle every revealed order is `Filled` or `Excluded`.
+
+Claim check order: `NotSettled`, `NotOrderOwner`, `AlreadyClaimed`, then `BadStatus` for a status with no payout.
+
 ### `withdrawForfeits()`
 
 - Anyone may trigger it. It sends `forfeitedBonds` to `treasury`, which is the only possible recipient, and resets the counter first.
+- Reverts with `ZeroAmount` when nothing is owed.
 
 Emits: `ForfeitsWithdrawn(treasury, amount)`.
 
@@ -253,12 +261,13 @@ Phase 4 unit tests must reproduce these numbers.
 **Events:**
 - `Committed(batchId, index, user, tokenIn, escrow, commitHash)`
 - `Revealed(batchId, index, amountIn, minOut)`
+- `OrderForfeited(batchId, index)` (added in Phase 3, D-013: emitted by settle for each unrevealed order)
 - `OrderExcluded(batchId, index)`
 - `Settled(batchId, filledInA, filledInB, residualToken, residualIn, residualOut, potA, potB)`
 - `Claimed(batchId, index, user, amountOut, refund, bondReturned)`
 - `ForfeitsWithdrawn(treasury, amount)`
 
-**Errors:** `WrongBond`, `InvalidToken`, `ZeroAmount`, `AmountTooLarge`, `BatchFull`, `UnsupportedToken`, `NotInRevealWindow`, `BadStatus`, `HashMismatch`, `ExceedsEscrow`, `NotSettleable`, `AlreadySettled`, `NotOrderOwner`, `NotSettled`, `AlreadyClaimed`, `ZeroAddress`, `InvalidWindow`, `EthTransferFailed`.
+**Errors** (most carry the offending values as arguments, e.g. `WrongBond(sent, required)`): `WrongBond`, `InvalidToken`, `ZeroAmount`, `AmountTooLarge`, `BatchFull`, `UnsupportedToken`, `NotInRevealWindow`, `BadStatus`, `HashMismatch`, `ExceedsEscrow`, `NotSettleable`, `AlreadySettled`, `NotOrderOwner`, `NotSettled`, `AlreadyClaimed`, `ZeroAddress`, `InvalidWindow`, `EthTransferFailed`.
 
 ## 9. Failure cases
 

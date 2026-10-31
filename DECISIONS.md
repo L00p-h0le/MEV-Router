@@ -92,3 +92,41 @@ A dated log of decisions, ADR style. Each entry gives the decision, the reason, 
 - **Decision:** `victimLoss = (fairOut − victimOut) · victimIn / fairOut`. This is the lost output valued at the victim's own no-attack average price, in `tokenIn` units, the same as Phase 0.
 - **Why:** it answers "how much input did the sandwich cost you", and it is independent of where the price ends up after the back-run.
 - **Rejected:** valuing at spot or at the post-attack price. Both depend on the attacker's own trades.
+
+## D-013 (2026-11-01): Phase 3 settles without clearing; revealed orders are refunded in full (review)
+- **Decision:**
+  - In Phase 3, `settle` forfeits unrevealed orders and marks the batch settled. Revealed orders stay `Revealed`.
+  - `claim` on a `Revealed` order returns its whole escrow plus the bond. This is the same payout an `Excluded` order gets.
+  - `settle` emits `OrderForfeited(batchId, index)` per forfeit, a new event next to `OrderExcluded`.
+  - Phase 4 replaces the interim branch with netting, the residual swap and the uniform price.
+- **Why:**
+  - `instruction.md` puts refunds in Phase 3 and netting in Phase 4. A forfeited order's escrow can only be refunded after settle, so Phase 3 needs a settle.
+  - Making it a full refund keeps every Phase 3 batch fund-safe; nothing is ever stuck.
+  - Without the event, a forfeit could only be detected by polling order status.
+- **Rejected:**
+  - Writing all of settle now: it jumps ahead of the phase.
+  - A settle that reverts while revealed orders exist: their funds would be locked until Phase 4.
+  - Marking revealed orders `Excluded` in Phase 3: that would give the status a meaning it does not have (it means "failed `minOut`").
+
+## D-014 (2026-11-01): Test parameters: bond 0.01 ETH, C = 10 blocks, R = 5 blocks (review)
+- **Decision:** the unit tests use `bond = 0.01 ether`, `commitBlocks = 10` and `revealBlocks = 5`, deployed at block 1,000. Deploy values stay open until Phase 8.
+- **Why:**
+  - The windows are short enough that tests can roll across several batches cheaply.
+  - R < C exercises the overlap where batch k+1 commits while batch k reveals.
+  - The bond is non-trivial, but small next to the test amounts.
+- **Rejected:** C = R. It hides off-by-one bugs that mix up the two lengths.
+
+## D-015 (2026-11-01): Small Phase 3 interface choices (review)
+- **Decision:**
+  - A zero `bond` in the constructor reverts with `ZeroAmount`.
+  - `withdrawForfeits` reverts with `ZeroAmount` when nothing is owed.
+  - A revealed `minOut` above `uint128` is stored saturated, not rejected.
+  - Errors carry their arguments, e.g. `WrongBond(sent, required)` and `NotInRevealWindow(batchId, block)`.
+  - Reveal is not `nonReentrant`: it makes no external calls.
+- **Why:**
+  - Saturation keeps the meaning of the order (unfillable, so excluded and refunded). Rejecting it would make the order unrevealable, and the user would lose the bond.
+  - Errors with arguments make test assertions exact and help debugging.
+  - The `ZeroAmount` revert avoids an event that moves nothing.
+- **Rejected:**
+  - A new `InvalidBond` error: one more error for the same meaning.
+  - A silent no-op withdrawal.

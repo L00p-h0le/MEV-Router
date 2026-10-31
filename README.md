@@ -1,19 +1,21 @@
 # W5: MEV-Protected Swap Router
 
-> **Educational reference only. Not audited, not production safe.** Work in progress: Phases 0 to 2 of 8 are done.
+> **Educational reference only. Not audited, not production safe.** Work in progress: Phases 0 to 3 of 8 are done.
 
 | Phase | Status |
 |---|---|
 | 0 Concepts, 1 Design + spec | Done (`SPEC.md`, `THREAT_MODEL.md`) |
 | 2 Attack baseline (`NaiveRouter` + `SandwichAttacker`) | Done, results in §4 |
-| 3 Commit/reveal core, 4 Netting + settlement | Not started |
+| 3 Commit/reveal core (`BatchRouter` commit, reveal, forfeit, refund) | Done |
+| 4 Netting + settlement | Not started |
 | 5 Attack re-run, 6 Invariants, 7 Hardening, 8 Write-up | Not started |
 
-The batch router (`BatchRouter`) is specified in `SPEC.md` but not yet implemented.
+`BatchRouter` has commit, reveal, forfeits and refunds. It does not clear trades yet: until Phase 4, a settled batch refunds every revealed order in full (`SPEC.md` §6.1).
 
 ## Layout
 
 ```
+src/BatchRouter.sol                 commit-reveal batch router (Phase 3: no clearing yet)
 src/NaiveRouter.sol                 baseline direct-swap router (attack target)
 vendor/amm/ConstantProductPair.sol  vendored x*y=k pool, 0.3% fee (written fresh, see vendor/README.md)
 test/                               unit, fuzz and sandwich-baseline tests, plus the SandwichAttacker harness

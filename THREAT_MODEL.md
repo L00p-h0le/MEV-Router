@@ -28,7 +28,7 @@
 | T7 | Gas DoS on settle | Many orders make the exclusion loop O(n²) | `MAX_ORDERS_PER_BATCH` bound | Measure in Phase 7; lower the cap if needed | 7 |
 | T8 | Cross-batch sandwich | Trade on the AMM between batch k's settle and k+1's, using knowledge of revealed flow | Reveal happens only after commits close; `minOut` | Revealed flow is public before settle, so the attacker can pre-position. **Analyse in Phase 5** | 5 |
 | T9 | Reentrancy | Malicious token or ETH receiver re-enters `claim`/`settle` | `nonReentrant`, CEI, only pair tokens allowed | Low | 7 |
-| T10 | Commit copying / replay | Copy someone's hash, or replay across chains or routers | `user`, `chainid` and router address are in the hash | None | 3 |
+| T10 | Commit copying / replay | Copy someone's hash, or replay across chains or routers | `user`, `chainid` and router address are in the hash | None. Tested in Phase 3 (`test_reveal_copiedCommitCannotBeOpened`, `test_commitHash_isDomainSeparated`) | 3 |
 | T11 | Rounding extraction | Many tiny orders farm rounding | Every payout rounds down; pots are physical | Dust accrues to the router, not the attacker | 6 |
 | T12 | Stuck funds | settle permanently reverts (for example, an emptied AMM) | Retry later | **Open item for Phase 7:** a timeout refund path | 7 |
 | T13 | Weird ERC-20s | Fee-on-transfer, rebasing, missing return value | Balance-delta check at commit; SafeERC20 | Rebasing tokens can still drift after commit; documented as unsupported | 7 |
