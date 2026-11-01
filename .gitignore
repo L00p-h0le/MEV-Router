@@ -23,3 +23,6 @@ instruction.md
 STATUS.md
 NOTES.md
 LEARN.md
+
+# Python bytecode from script/*.py
+__pycache__/

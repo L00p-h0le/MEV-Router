@@ -167,3 +167,36 @@ A dated log of decisions, ADR style. Each entry gives the decision, the reason, 
 - **Rejected:**
   - Reading the fee from the pair at every price step: an external call per round for a value that never changes.
   - A `previewOut` that only works after settle: clients need a pre-settle estimate to choose `minOut`.
+
+## D-020 (2026-11-01): Phase 5 attacker model and how losses are measured (review)
+- **Decision:**
+  - The D-011 attacker (unlimited capital, the test as the builder, no gas or tips) gains three powers in batch mode:
+    - it can be the settler, so it can bundle [AMM front-run, `settle`, AMM back-run] itself, with no builder needed;
+    - it reads every revealed `minOut` from storage before settle;
+    - it sees direction and escrow at commit (T5).
+  - Front-runs and joins are sized to the **largest** amount that keeps the victim filled (as in D-011). The search uses `previewOut` under `vm.snapshotState`, so it works for any batch composition.
+  - Victim loss is reported against two references:
+    - the victim's **direct quote**, which is what its `minOut` is computed from, and what it would get from `NaiveRouter` without an attack;
+    - the **honest batch outcome**, the same batch with no attacker.
+  - Expected values are re-derived independently in `script/attack_reference.py`.
+- **Why:** this is the strongest attacker the design must face. The settler is anyone, and reveals are public. Two references are needed because netting makes the honest batch better than the direct quote, and the attack can take that difference too (see D-021).
+- **Rejected:**
+  - An attacker that guesses `minOut`: weaker, and the ladder test (T4) shows guessing is unnecessary.
+  - Profit-maximising (interior) sizing: not needed to show the victim's loss, which the boundary already maximises.
+
+## D-021 (2026-11-01): Phase 5 finding: the uniform price stops in-batch ordering, not the settle sandwich (review)
+- **Finding** (measured, `test/BatchAttack.t.sol`):
+  - **T1, in-batch legs:** front-run and back-run orders placed inside the batch never gain at the clearing price, whatever their position. **Removed.**
+  - **T2, settle sandwich:** a one-sided batch is a public swap of the summed input, with every `minOut` visible. The attacker settles between its own AMM legs and extracts **exactly** the naive sandwich: 981.546959 USDC from a 100k victim at 1%, the same front-run to the base unit. With opposing flow it extracts *more*, because the netting surplus becomes slack above `minOut`: 1,502.56 USDC at 10 ETH of counterflow.
+  - **T8, join + back-run:** joining the victim's side and selling the share into the moved pool keeps 920.10 of the 981.55.
+  - In every case the victim still receives at least its `minOut`. The router's guarantee equals `NaiveRouter`'s: loss ≤ slippage tolerance.
+- **Decision (for now):** document it honestly. No design change in Phase 5, which is a measurement phase.
+- **Recommendation for Phase 7** (needs the user's approval, because it changes the vendored AMM and the settle rule): bound the clearing price by a TWAP.
+  1. Add a V2-style cumulative-price accumulator to `vendor/amm/ConstantProductPair.sol`.
+  2. At settle, compare the pair's spot to the TWAP over the reveal window. If spot deviates by more than a fixed band, exclude the residual side or revert-and-retry.
+  
+  A same-block front-run then cannot move the reference price. The attacker would have to hold a manipulated price across several blocks, exposed to arbitrage.
+- **Alternatives considered:**
+  - Users set `minOut` from `previewOut`. This shrinks the netting slack, but not the 1% the user tolerates, and the preview changes as others reveal.
+  - Private or encrypted settlement (threshold encryption, SUAVE-style). This is out of scope for an on-chain educational build.
+  - Splitting the residual over several blocks. This adds latency and complexity, and still leaks.
