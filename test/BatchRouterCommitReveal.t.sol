@@ -9,7 +9,8 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {FeeOnTransferERC20} from "./mocks/FeeOnTransferERC20.sol";
 import {ContractUser} from "./mocks/ContractUser.sol";
 
-/// @notice Phase 3 tests: commit, reveal, block windows, bonds, forfeits, refunds (SPEC.md §3-6, D-013).
+/// @notice Phase 3 tests: commit, reveal, block windows, bonds, forfeits, refunds (SPEC.md §3-6). The pair is never
+///         seeded here, so every revealed order is excluded and refunded in full at settle (D-017).
 contract BatchRouterCommitRevealTest is Test {
     MockERC20 internal weth;
     MockERC20 internal usdc;
@@ -467,7 +468,8 @@ contract BatchRouterCommitRevealTest is Test {
         emit BatchRouter.OrderForfeited(b, iB);
         router.settle(b);
 
-        assertEq(uint8(router.getOrder(b, iA).status), uint8(BatchRouter.Status.Revealed));
+        // The pool is unseeded, so the revealed order is excluded and refunded (D-017).
+        assertEq(uint8(router.getOrder(b, iA).status), uint8(BatchRouter.Status.Excluded));
         assertEq(uint8(router.getOrder(b, iB).status), uint8(BatchRouter.Status.Forfeited));
         assertEq(router.forfeitedBonds(), BOND);
     }
@@ -501,7 +503,7 @@ contract BatchRouterCommitRevealTest is Test {
         router.claim(b, i);
     }
 
-    function test_claim_revealedRefundsEscrowAndBond() public {
+    function test_claim_excludedRefundsEscrowAndBond() public {
         (uint256 b, uint256 i) = _commit(alice, true, 3e18, 2e18, 0, SALT);
         _rollToReveal(b);
         router.reveal(b, i, 2e18, 0, SALT);

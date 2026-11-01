@@ -1,25 +1,26 @@
 # W5: MEV-Protected Swap Router
 
-> **Educational reference only. Not audited, not production safe.** Work in progress: Phases 0 to 3 of 8 are done.
+> **Educational reference only. Not audited, not production safe.** Work in progress: Phases 0 to 4 of 8 are done.
 
 | Phase | Status |
 |---|---|
 | 0 Concepts, 1 Design + spec | Done (`SPEC.md`, `THREAT_MODEL.md`) |
 | 2 Attack baseline (`NaiveRouter` + `SandwichAttacker`) | Done, results in §4 |
 | 3 Commit/reveal core (`BatchRouter` commit, reveal, forfeit, refund) | Done |
-| 4 Netting + settlement | Not started |
+| 4 Netting + settlement (residual swap, uniform price, `minOut` exclusion) | Done, reference table in §4 |
 | 5 Attack re-run, 6 Invariants, 7 Hardening, 8 Write-up | Not started |
 
-`BatchRouter` has commit, reveal, forfeits and refunds. It does not clear trades yet: until Phase 4, a settled batch refunds every revealed order in full (`SPEC.md` §6.1).
+`BatchRouter` runs the full batch auction: commit, reveal, forfeit, netting, the residual AMM swap, one uniform price per batch and per-order `minOut` exclusion. The attack re-run against it is Phase 5.
 
 ## Layout
 
 ```
-src/BatchRouter.sol                 commit-reveal batch router (Phase 3: no clearing yet)
+src/BatchRouter.sol                 commit-reveal batch router with uniform-price settlement
 src/NaiveRouter.sol                 baseline direct-swap router (attack target)
 vendor/amm/ConstantProductPair.sol  vendored x*y=k pool, 0.3% fee (written fresh, see vendor/README.md)
 test/                               unit, fuzz and sandwich-baseline tests, plus the SandwichAttacker harness
-SPEC.md, THREAT_MODEL.md            behaviour and threats of the planned batch router
+script/clearing_reference.py        exact-integer mirror of the clearing math (expected test values)
+SPEC.md, THREAT_MODEL.md            behaviour and threats of the batch router
 DECISIONS.md                        dated design decisions
 ```
 
@@ -60,6 +61,20 @@ Victim 100,000 USDC, slippage 1%, varying pool depth:
 
 With `minOut = 0` and 2M USDC of attacker capital, the 100k victim receives 12.1776 ETH instead of 47.4829 ETH, a loss of 74,353.55 USDC.
 
+### Batch clearing: SPEC §7 reference batches (Phase 4, measured)
+
+These are exact integers from `forge test --mc BatchRouterSettlementTest`. They match `script/clearing_reference.py`. Pool 1,000 ETH / 2,000,000 USDC; P is in USDC per ETH, floored to 6 decimals.
+
+| Sell ETH | Sell USDC | Case | AMM residual | P for ETH sellers | P for USDC sellers |
+|---|---|---|---|---|---|
+| 10 | 30,000 | USDC excess | 9,841.405404 USDC | 2015.859459 | 2015.859459 |
+| 30 | 10,000 | ETH excess | 24.860651606560976461 ETH | 1945.771960 | 1945.771960 |
+| 10 | 20,000 | fee band | none (pool untouched) | 2000.000000 | 2000.000000 |
+| 10 | 20,050 | fee band | none | 2005.000000 | 2005.000000 |
+| 0 | 100,000 | one-sided | 100,000 USDC | — | 2106.018054 (= direct swap, to the wei) |
+
+Both sides of a batch get the same price, and only the net imbalance touches the pool.
+
 *Pending (Phase 5): the same attacker against the batch router.*
 
 ## 5. Limitations and production changes
@@ -76,6 +91,8 @@ forge install OpenZeppelin/openzeppelin-contracts@v5.4.0 --no-git --shallow
 forge build
 forge test -vv
 forge test --mc SandwichBaselineTest -vv   # prints the Phase 2 baseline tables
+forge test --mc BatchRouterSettlementTest -vv   # Phase 4 clearing tests (prints worst-case settle gas)
+python script/clearing_reference.py        # recomputes the Phase 4 expected values
 forge fmt --check
 forge fmt --check vendor   # vendor/ is outside forge fmt's default paths
 ```

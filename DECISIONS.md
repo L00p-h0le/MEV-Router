@@ -93,7 +93,7 @@ A dated log of decisions, ADR style. Each entry gives the decision, the reason, 
 - **Why:** it answers "how much input did the sandwich cost you", and it is independent of where the price ends up after the back-run.
 - **Rejected:** valuing at spot or at the post-attack price. Both depend on the attacker's own trades.
 
-## D-013 (2026-11-01): Phase 3 settles without clearing; revealed orders are refunded in full (review)
+## D-013 (2026-11-01): Phase 3 settles without clearing; revealed orders are refunded in full (review). **Superseded in Phase 4** (the interim branch is removed; see D-016 to D-019)
 - **Decision:**
   - In Phase 3, `settle` forfeits unrevealed orders and marks the batch settled. Revealed orders stay `Revealed`.
   - `claim` on a `Revealed` order returns its whole escrow plus the bond. This is the same payout an `Excluded` order gets.
@@ -130,3 +130,40 @@ A dated log of decisions, ADR style. Each entry gives the decision, the reason, 
 - **Rejected:**
   - A new `InvalidBond` error: one more error for the same meaning.
   - A silent no-op withdrawal.
+
+## D-016 (2026-11-01): A fill must pay at least 1 base unit; `minOut = 0` counts as 1 (review)
+- **Decision:** at settle, an order is satisfied only if `out_i ≥ max(minOut_i, 1)`. The same effective limit is used when ranking violators by limit ratio.
+- **Why:** a filled order with `out_i = 0` gives up its whole input for nothing. Its input then sits in the opposite pot with no one entitled to it, so it is stuck in the router forever. This happens in practice for tiny orders: 1 wei of WETH quotes 0 USDC (`test_exclusion_zeroPayoutNeverFills`). Treating 0 as 1 keeps the exclusion rule unchanged and turns that case into an ordinary refund.
+- **Rejected:**
+  - Rejecting `minOut = 0` at reveal: the user would lose the bond for a harmless parameter choice.
+  - A minimum order size: it does not cover every rounding-to-zero case, and it is a Phase 7 topic (T6).
+  - Allowing zero fills: it silently burns user funds.
+
+## D-017 (2026-11-01): An unseeded pool fills nothing (review)
+- **Decision:** if either pair reserve is 0 at settle, every revealed order is `Excluded` and refunded in full.
+- **Why:** with zero reserves, both residual tests (`997·b·XA > 1000·a·XB` and its mirror) are false. So every batch falls into the "fee band" and clears at XB/XA with no reference price at all. Only `minOut` would protect users, and a `minOut` of 0 would be filled at any ratio. The Phase 3 suite runs against an unseeded pair, which is how this case showed up.
+- **Rejected:**
+  - Reverting settle: funds would be locked until someone seeds the pool.
+  - Clearing at XB/XA anyway: users could be matched at an arbitrary price.
+
+## D-018 (2026-11-01): A side total or pot above `uint128` reverts settle with `AmountTooLarge` (review)
+- **Decision:** each order is capped at `uint128` at commit, but up to 100 of them can sum to more. `_price` reverts if `XA` or `XB` exceeds `type(uint128).max`, and the stored pots are range-checked.
+- **Why:** the cap keeps every product in the closed form below 2^256 (`2^10 · 2^112 · 2^128`), so plain checked arithmetic is enough. It also lets the totals be stored in the existing packed `uint128` fields. Reaching it needs more than 3.4·10^38 base units of one token in one batch, which a real token cannot supply. The pair would also revert on such a residual anyway (`uint112` reserves).
+- **Rejected:**
+  - Widening the batch fields to `uint256`: about 2 more storage slots per settle, for a case only a mock token can reach.
+  - Excluding orders until the total fits: more code and a new ordering question, for an unreachable case.
+- **Known consequence:** settle can revert permanently for such a batch, which locks funds. This is the existing open item T12 (timeout refund, Phase 7).
+
+## D-019 (2026-11-01): Clearing runs over a memory copy; `previewOut` simulates settling now
+- **Decision:**
+  - `_clear` copies each order (`amountIn`, `minOut`, direction) into a memory array once and runs the price and exclude loop entirely over memory.
+  - `settle` and `previewOut` share that function.
+  - Before settle, `previewOut` reports the result of settling at the current block, with the orders revealed so far.
+  - The fee constants 997/1000 are local constants that must equal the pair's. A one-order batch that equals a direct swap to the wei is the test that pins them.
+- **Why:**
+  - The exclusion loop is O(rounds × orders). Re-reading storage each round would cost several warm SLOADs per order per round.
+  - Measured worst case with a memory copy: about 10.84M gas for a full 100-order batch that needs about 50 rounds (`test_gas_fullBatchWorstCaseExclusion`).
+  - One shared function means the preview cannot drift from settle.
+- **Rejected:**
+  - Reading the fee from the pair at every price step: an external call per round for a value that never changes.
+  - A `previewOut` that only works after settle: clients need a pre-settle estimate to choose `minOut`.

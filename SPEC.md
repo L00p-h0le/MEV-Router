@@ -1,6 +1,6 @@
 # SPEC.md: BatchRouter (source of truth for behaviour)
 
-**Status:** Phase 1 draft, 2026-10-26. Phase 3 (2026-11-01): §5, §6 commit/reveal/claim/withdraw and §8 are implemented in `src/BatchRouter.sol`; settle step 1 only (see §6.1). Code must match this file; if they diverge, update one deliberately and log it in `DECISIONS.md`.
+**Status:** Phase 1 draft, 2026-10-26. Phase 3 (2026-11-01): commit, reveal, claim, withdraw. Phase 4 (2026-11-01): settle (§6) and the clearing math (§7) are implemented in full in `src/BatchRouter.sol`, and the §7 reference table is reproduced by `test/BatchRouterSettlement.t.sol`. Code must match this file; if they diverge, update one deliberately and log it in `DECISIONS.md`.
 
 **Educational reference only. Not audited.**
 
@@ -150,17 +150,17 @@ Reverts with:
 - `NotSettleable` if called too early;
 - `AlreadySettled` if called a second time.
 
-Algorithm:
+Algorithm (orders are copied into memory once; the loop runs over memory):
 1. **Forfeit.** Every order still `Committed` becomes `Forfeited`, and `forfeitedBonds += bond`.
-2. **Include.** The included set is every `Revealed` order.
-3. **Loop** (at most `orderCount` rounds):
-   1. Compute `XA`, `XB`, the residual and the pots from the AMM reserves (§7).
+2. **Include.** The included set is every `Revealed` order. **If either AMM reserve is 0, every revealed order is `Excluded` instead** (D-017): an unseeded pool gives no reference price, so the fee-band test below would let orders clear against each other at any ratio.
+3. **Loop** (each extra round excludes at least one order, so at most `orderCount + 1` rounds):
+   1. Compute `XA`, `XB`, the residual and the pots from the AMM reserves (§7). If `XA` or `XB` exceeds `type(uint128).max`, revert `AmountTooLarge(total)` (D-018).
    2. For each included order, compute `out_i = floor(amountIn_i · pot / X_side)`.
-   3. If every order satisfies `out_i ≥ minOut_i`, stop.
-   4. Otherwise, **for each side separately**, exclude *all* violating orders whose limit ratio `minOut_i / amountIn_i` equals that side's maximum among violators. Ties go out together, so the rule depends only on the set of orders, never on index or position. Compare ratios by cross-multiplying, never by dividing.
+   3. An order is satisfied if `out_i ≥ max(minOut_i, 1)`: **a `minOut` of 0 counts as 1**, so a fill always pays something (D-016). If every order is satisfied, stop.
+   4. Otherwise, **for each side separately**, exclude *all* violating orders whose limit ratio `max(minOut_i, 1) / amountIn_i` equals that side's maximum among violators. Ties go out together, so the rule depends only on the set of orders, never on index or position. Compare ratios by cross-multiplying, never by dividing.
    5. Excluded orders get status `Excluded`; go back to step 3.1.
-4. **Execute.** If the residual > 0, call `pair.swapExactIn(residualToken, residual, quotedOut, router)`. `quotedOut` is the exact output computed in step 3.1 for the same block and reserves, so the swap returns exactly that amount or reverts.
-5. **Record.** Store `filledInA`, `filledInB`, `potA` and `potB`; mark the included orders `Filled` and set `settled = true`.
+4. **Record** (effects before the interaction). Write every order's final status, `forfeitedBonds`, `settled = true`, `filledInA`, `filledInB`, `potA` and `potB`. A pot above `uint128` reverts `AmountTooLarge`.
+5. **Execute.** If the residual > 0, `forceApprove` exactly the residual to the pair and call `pair.swapExactIn(residualToken, residual, quotedOut, router)`. `quotedOut` is the exact output computed in step 3.1 for the same block and reserves, so the swap returns at least that amount or the whole settle reverts. A residual whose quoted output is 0 is dropped before this step (the batch is then priced as in the fee band).
 
 Emits:
 - `OrderForfeited(batchId, index)` for each forfeited order;
@@ -181,11 +181,11 @@ Emits:
 
 Emits: `Claimed(batchId, index, user, amountOut, refund, bondReturned)`.
 
-### 6.1 Phase 3 interim settle and claim (D-013)
+### 6.1 Claim details
 
-Until Phase 4 adds clearing, `settle` runs only step 1 (forfeit) and step 5's `settled = true`, and emits `Settled` with all amounts zero and `residualToken = address(0)`. Revealed orders keep status `Revealed`. `claim` on a `Revealed` order refunds the full `escrow` and the bond (the same payout as `Excluded`). Phase 4 removes this interim branch: after settle every revealed order is `Filled` or `Excluded`.
+The Phase 3 interim rule (D-013: settle without clearing, refund every revealed order) was removed in Phase 4. After settle, every existing order is `Filled`, `Excluded` or `Forfeited`.
 
-Claim check order: `NotSettled`, `NotOrderOwner`, `AlreadyClaimed`, then `BadStatus` for a status with no payout.
+Claim check order: `NotSettled`, `NotOrderOwner`, `AlreadyClaimed`. There is no status check: the three post-settle statuses are exhaustive, and a non-existent index has `user == address(0)`, so it fails `NotOrderOwner`. Zero-amount token transfers (for example the refund of an exactly escrowed fill) are skipped.
 
 ### `withdrawForfeits()`
 
@@ -197,6 +197,10 @@ Emits: `ForfeitsWithdrawn(treasury, amount)`.
 ### Views
 
 `currentBatchId()`, `batchWindows(batchId)`, `getOrder(batchId, index)`, `getBatch(batchId)`, `computeCommitHash(...)`, `previewOut(batchId, index)`.
+
+`previewOut(batchId, index)` returns the output token amount the order receives:
+- **after settle:** the exact claimable output, or 0 unless `Filled`;
+- **before settle:** a simulation of settling *now*, with the orders revealed so far and the current reserves. It returns 0 if the order is not revealed or would be excluded. The value can change as more orders are revealed or the pool moves.
 
 ## 7. Clearing-price math
 
@@ -254,7 +258,7 @@ Reference values, verified with an exact-integer script (D-007). The pool is 1,0
 | 10 | 20,050 | fee band | 2005.000000 | 2005.000000 |
 | 0 | 100,000 | one-sided | — | 2106.018054 (= direct swap, 47.482973758155927037 ETH) |
 
-Phase 4 unit tests must reproduce these numbers.
+Phase 4 unit tests must reproduce these numbers. **Done:** `test_spec_*` in `test/BatchRouterSettlement.t.sol` assert the exact integers from `script/clearing_reference.py`. The contract floors where the table rounds, so 2015.859460 is asserted as 2,015,859,459 USDC base units per ETH, and 1945.771961 as 1,945,771,960.
 
 ## 8. Events and errors
 
@@ -275,6 +279,9 @@ Phase 4 unit tests must reproduce these numbers.
 |---|---|
 | User never reveals | Forfeited at settle: bond to the treasury, escrow refundable via `claim` |
 | Order fails `minOut` at P | Excluded by the §6 loop; full escrow and bond returned |
+| Order would be paid 0 (for example 1 wei in) | Treated as failing `minOut` (D-016): excluded and refunded |
+| Pool unseeded (a reserve is 0) | Every revealed order is excluded and refunded (D-017) |
+| A side's revealed total > `uint128`, or a pot > `uint128` | `settle` reverts `AmountTooLarge` (D-018). Same open item as below (T12) |
 | Every order excluded | No AMM swap; the batch settles empty |
 | No orders | `settle` just marks the batch settled |
 | `settle` never called | Anyone (including any user) can call it at any later block. **Open item (Phase 7):** a timeout path if settle permanently reverts |
